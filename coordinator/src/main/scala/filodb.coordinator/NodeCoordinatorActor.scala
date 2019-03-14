@@ -2,13 +2,17 @@ package filodb.coordinator
 
 import scala.collection.mutable.HashMap
 import scala.concurrent.duration._
+import scala.util.Random
 
-import akka.actor.{ActorRef, OneForOneStrategy, PoisonPill, Props, Terminated}
+import akka.actor.{ActorRef, Address, OneForOneStrategy, PoisonPill, Props, Terminated}
 import akka.actor.SupervisorStrategy.{Restart, Stop}
+import akka.cluster.Cluster
+import akka.cluster.ClusterEvent.{MemberEvent, MemberRemoved, MemberUp}
 import akka.event.LoggingReceive
 import com.typesafe.config.Config
 import net.ceedubs.ficus.Ficus._
 
+import filodb.coordinator.ActorName.nodeCoordinatorPath
 import filodb.coordinator.client.MiscCommands
 import filodb.core._
 import filodb.core.downsample.DownsampleConfig
@@ -59,8 +63,16 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
   var clusterActor: Option[ActorRef] = None
   val shardMaps = new HashMap[DatasetRef, ShardMapper]
   var statusActor: Option[ActorRef] = None
+  val cluster = Cluster(context.system)
+  val nodeCoordinatorActors = new HashMap[Address, ActorRef]
+  val random = new Random()
 
   private val statusAckTimeout = config.as[FiniteDuration]("tasks.timeouts.status-ack-timeout")
+
+  // subscribe to cluster changes, re-subscribe when restart
+  override def preStart(): Unit = {
+    cluster.subscribe(self, classOf[MemberEvent])
+  }
 
   // By default, stop children IngestionActors when something goes wrong.
   // restart query actors though
@@ -81,7 +93,36 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
   // For now, datasets need to be set up for ingestion before they can be queried (in-mem only)
   // TODO: if we ever support query API against cold (not in memory) datasets, change this
   private def withQueryActor(originator: ActorRef, dataset: DatasetRef)(func: ActorRef => Unit): Unit =
-    queryActors.get(dataset).map(func).getOrElse(originator ! UnknownDataset)
+    //queryActors.get(dataset).map(func).getOrElse(originator ! UnknownDataset)
+    queryActors.get(dataset) match {
+      case Some(queryActor) => func(queryActor)
+      case None => getRandomActor(nodeCoordinatorActors.values.toIndexedSeq, random).forward(originator)
+    }
+
+  private def getRandomActor(list: IndexedSeq[ActorRef], random: Random): ActorRef =
+    list(random.nextInt(list.size))
+
+  /** Subscribe to member events to track the right nodes to FORWARD to.
+    * This attempts to avoid the 404 from "spare" nodes.
+    */
+  private final case class NodeCoordinatorActorDiscovered(addr: Address, coordinator: ActorRef)
+
+  def receiveMemberEvent: Receive = {
+    case MemberUp(member) =>
+      val memberCoordActorPath = nodeCoordinatorPath(member.address)
+      context.actorSelection(memberCoordActorPath).resolveOne(settings.ResolveActorTimeout)
+        .map(ref => self ! NodeCoordinatorActorDiscovered(memberCoordActorPath.address, ref))
+        .recover {
+          case e: Exception =>
+            logger.warn(s"Unable to resolve coordinator at $memberCoordActorPath, ignoring. ", e)
+        }
+    case MemberRemoved(member, _) =>
+      nodeCoordinatorActors.remove(nodeCoordinatorPath(member.address).address)
+  }
+
+  def receiveNodeCoordDiscoveryEvent: Receive = {
+    case NodeCoordinatorActorDiscovered(addr, coordRef) => nodeCoordinatorActors(addr) = coordRef
+  }
 
   private def createDataset(originator: ActorRef,
                             datasetObj: Dataset): Unit = {
