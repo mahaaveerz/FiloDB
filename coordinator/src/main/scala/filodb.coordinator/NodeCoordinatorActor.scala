@@ -95,10 +95,9 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
   // For now, datasets need to be set up for ingestion before they can be queried (in-mem only)
   // TODO: if we ever support query API against cold (not in memory) datasets, change this
   private def withQueryActor(originator: ActorRef, dataset: DatasetRef)(func: ActorRef => Unit): Unit =
-    //queryActors.get(dataset).map(func).getOrElse(originator ! UnknownDataset)
     queryActors.get(dataset) match {
       case Some(queryActor) =>
-        logger.debug("routing query to " + queryActor)
+        logger.debug("Routing query to " + queryActor)
         func(queryActor)
 
       case None =>
@@ -107,11 +106,7 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
         func(randomActor)
     }
 
-  private def getRandomActor(list: ArrayBuffer[ActorRef], random: Random): ActorRef = {
-    logger.info("list size: " + list.size)
-    list(random.nextInt(list.size))
-  }
-
+  private def getRandomActor(list: ArrayBuffer[ActorRef], random: Random): ActorRef = list(random.nextInt(list.size))
 
 
   /** Subscribe to member events to track the right nodes to FORWARD to.
@@ -121,7 +116,7 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
 
   def receiveMemberEvent: Receive = {
     case MemberUp(member) =>
-      logger.info("member up: " + member)
+      logger.debug(s"Member up received: $member")
       val memberCoordActorPath = nodeCoordinatorPath(member.address)
       context.actorSelection(memberCoordActorPath).resolveOne(settings.ResolveActorTimeout)
         .map(ref => self ! NodeCoordinatorActorDiscovered(memberCoordActorPath.address, ref))
@@ -129,6 +124,9 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
           case e: Exception =>
             logger.warn(s"Unable to resolve coordinator at $memberCoordActorPath, ignoring. ", e)
         }
+      logger.debug(s"Member up updated map: $nodeCoordinatorActorsMap")
+      logger.debug(s"Member up updated list: $nodeCoordinatorActors")
+
     case MemberRemoved(member, _) => {
       val memberCoordActorPath = nodeCoordinatorPath(member.address)
       nodeCoordinatorActorsMap.get(memberCoordActorPath.address) match {
@@ -136,15 +134,16 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
           nodeCoordinatorActorsMap.remove(memberCoordActorPath.address)
           nodeCoordinatorActors -= x
         }
-        case None => logger.info("Member not in coordinatorsMap: " + memberCoordActorPath.address +
-          "\nMembers are: " + nodeCoordinatorActorsMap)
+        case None => logger.warn(s"Member not in coordinatorsMap: $memberCoordActorPath.address")
       }
+      logger.debug(s"Member down updated map: $nodeCoordinatorActorsMap")
+      logger.debug(s"Member down updated list: $nodeCoordinatorActors")
     }
   }
 
   def receiveNodeCoordDiscoveryEvent: Receive = {
     case NodeCoordinatorActorDiscovered(addr, coordRef) => {
-      logger.debug("receiveNodeCoordDiscoveryEvent")
+      logger.debug("Received NodeCoordDiscoveryEvent")
       nodeCoordinatorActorsMap(addr) = coordRef
       nodeCoordinatorActors += coordRef
     }
