@@ -124,8 +124,6 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
           case e: Exception =>
             logger.warn(s"Unable to resolve coordinator at $memberCoordActorPath, ignoring. ", e)
         }
-      logger.debug(s"Member up updated map: $nodeCoordinatorActorsMap")
-      logger.debug(s"Member up updated list: $nodeCoordinatorActors")
 
     case MemberRemoved(member, _) => {
       val memberCoordActorPath = nodeCoordinatorPath(member.address)
@@ -139,13 +137,17 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
       logger.debug(s"Member down updated map: $nodeCoordinatorActorsMap")
       logger.debug(s"Member down updated list: $nodeCoordinatorActors")
     }
+
+    case _: MemberEvent => // ignore
   }
 
   def receiveNodeCoordDiscoveryEvent: Receive = {
     case NodeCoordinatorActorDiscovered(addr, coordRef) => {
-      logger.debug("Received NodeCoordDiscoveryEvent")
+      logger.debug(s"Received NodeCoordDiscoveryEvent $addr  $coordRef")
       nodeCoordinatorActorsMap(addr) = coordRef
       nodeCoordinatorActors += coordRef
+      logger.debug(s"Member up updated map: $nodeCoordinatorActorsMap")
+      logger.debug(s"Member up updated list: $nodeCoordinatorActors")
     }
   }
 
@@ -239,10 +241,10 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
   def queryHandlers: Receive = LoggingReceive {
     case q: QueryCommand =>
       val originator = sender()
-      withQueryActor(originator, q.dataset) { _.tell(q, originator) }
+      withQueryActor(originator, q.dataset) { _.forward(q) }
     case QueryActor.ThrowException(dataset) =>
       val originator = sender()
-      withQueryActor(originator, dataset) { _.tell(QueryActor.ThrowException(dataset), originator) }
+      withQueryActor(originator, dataset) { _.forward(QueryActor.ThrowException(dataset)) }
 
   }
 
@@ -260,13 +262,18 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
       // NOTE: QueryActor has AtomicRef so no need to forward message to it
   }
 
+  def receiveUnknown: Receive = {
+    case x => logger.debug(s"**** received unknown  $x ****")
+  }
+
   def receive: Receive = {
     queryHandlers orElse
       ingestHandlers orElse
       datasetHandlers orElse
       coordinatorReceive orElse
       receiveMemberEvent orElse
-      receiveNodeCoordDiscoveryEvent
+      receiveNodeCoordDiscoveryEvent orElse
+      receiveUnknown
   }
 
   private def registered(e: CoordinatorRegistered): Unit = {
