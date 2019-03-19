@@ -1,13 +1,13 @@
 package filodb.coordinator
 
-import scala.collection.mutable.HashMap
+import scala.collection.mutable.{ArrayBuffer, HashMap}
 import scala.concurrent.duration._
 import scala.util.Random
 
 import akka.actor.{ActorRef, Address, OneForOneStrategy, PoisonPill, Props, Terminated}
 import akka.actor.SupervisorStrategy.{Restart, Stop}
 import akka.cluster.Cluster
-import akka.cluster.ClusterEvent.{MemberEvent, MemberRemoved, MemberUp}
+import akka.cluster.ClusterEvent.{InitialStateAsEvents, MemberEvent, MemberRemoved, MemberUp}
 import akka.event.LoggingReceive
 import com.typesafe.config.Config
 import net.ceedubs.ficus.Ficus._
@@ -64,14 +64,16 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
   val shardMaps = new HashMap[DatasetRef, ShardMapper]
   var statusActor: Option[ActorRef] = None
   val cluster = Cluster(context.system)
-  val nodeCoordinatorActors = new HashMap[Address, ActorRef]
+  val nodeCoordinatorActorsMap = new HashMap[Address, ActorRef]
+  val nodeCoordinatorActors = new ArrayBuffer[ActorRef]
   val random = new Random()
 
   private val statusAckTimeout = config.as[FiniteDuration]("tasks.timeouts.status-ack-timeout")
 
   // subscribe to cluster changes, re-subscribe when restart
   override def preStart(): Unit = {
-    cluster.subscribe(self, classOf[MemberEvent])
+    logger.info("Subscribing to member events")
+    cluster.subscribe(self, initialStateMode = InitialStateAsEvents, classOf[MemberEvent])
   }
 
   // By default, stop children IngestionActors when something goes wrong.
@@ -95,12 +97,22 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
   private def withQueryActor(originator: ActorRef, dataset: DatasetRef)(func: ActorRef => Unit): Unit =
     //queryActors.get(dataset).map(func).getOrElse(originator ! UnknownDataset)
     queryActors.get(dataset) match {
-      case Some(queryActor) => func(queryActor)
-      case None => getRandomActor(nodeCoordinatorActors.values.toIndexedSeq, random).forward(originator)
+      case Some(queryActor) =>
+        logger.debug("routing query to " + queryActor)
+        func(queryActor)
+
+      case None =>
+        val randomActor = getRandomActor(nodeCoordinatorActors, random)
+        logger.debug("Routing to random actor: " + randomActor)
+        func(randomActor)
     }
 
-  private def getRandomActor(list: IndexedSeq[ActorRef], random: Random): ActorRef =
+  private def getRandomActor(list: ArrayBuffer[ActorRef], random: Random): ActorRef = {
+    logger.info("list size: " + list.size)
     list(random.nextInt(list.size))
+  }
+
+
 
   /** Subscribe to member events to track the right nodes to FORWARD to.
     * This attempts to avoid the 404 from "spare" nodes.
@@ -109,6 +121,7 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
 
   def receiveMemberEvent: Receive = {
     case MemberUp(member) =>
+      logger.info("member up: " + member)
       val memberCoordActorPath = nodeCoordinatorPath(member.address)
       context.actorSelection(memberCoordActorPath).resolveOne(settings.ResolveActorTimeout)
         .map(ref => self ! NodeCoordinatorActorDiscovered(memberCoordActorPath.address, ref))
@@ -116,12 +129,25 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
           case e: Exception =>
             logger.warn(s"Unable to resolve coordinator at $memberCoordActorPath, ignoring. ", e)
         }
-    case MemberRemoved(member, _) =>
-      nodeCoordinatorActors.remove(nodeCoordinatorPath(member.address).address)
+    case MemberRemoved(member, _) => {
+      val memberCoordActorPath = nodeCoordinatorPath(member.address)
+      nodeCoordinatorActorsMap.get(memberCoordActorPath.address) match {
+        case Some(x) => {
+          nodeCoordinatorActorsMap.remove(memberCoordActorPath.address)
+          nodeCoordinatorActors -= x
+        }
+        case None => logger.info("Member not in coordinatorsMap: " + memberCoordActorPath.address +
+          "\nMembers are: " + nodeCoordinatorActorsMap)
+      }
+    }
   }
 
   def receiveNodeCoordDiscoveryEvent: Receive = {
-    case NodeCoordinatorActorDiscovered(addr, coordRef) => nodeCoordinatorActors(addr) = coordRef
+    case NodeCoordinatorActorDiscovered(addr, coordRef) => {
+      logger.debug("receiveNodeCoordDiscoveryEvent")
+      nodeCoordinatorActorsMap(addr) = coordRef
+      nodeCoordinatorActors += coordRef
+    }
   }
 
   private def createDataset(originator: ActorRef,
@@ -235,7 +261,14 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
       // NOTE: QueryActor has AtomicRef so no need to forward message to it
   }
 
-  def receive: Receive = queryHandlers orElse ingestHandlers orElse datasetHandlers orElse coordinatorReceive
+  def receive: Receive = {
+    queryHandlers orElse
+      ingestHandlers orElse
+      datasetHandlers orElse
+      coordinatorReceive orElse
+      receiveMemberEvent orElse
+      receiveNodeCoordDiscoveryEvent
+  }
 
   private def registered(e: CoordinatorRegistered): Unit = {
     logger.info(s"${e.clusterActor} said hello!")
