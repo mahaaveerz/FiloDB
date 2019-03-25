@@ -14,20 +14,13 @@ import org.xerial.snappy.Snappy
 import remote.RemoteStorage.ReadRequest
 
 import filodb.coordinator.client.IngestionCommands.UnknownDataset
-import filodb.coordinator.client.QueryCommands.{LogicalPlan2Query, QueryOptions, SpreadChange}
-import filodb.coordinator.client.QueryCommands
+import filodb.coordinator.client.QueryCommands.{LogicalPlan2Query, QueryOptions, SpreadChange, StaticSpreadProvider}
 import filodb.core.DatasetRef
-import filodb.core.query.ColumnFilter
 import filodb.prometheus.ast.TimeStepParams
 import filodb.prometheus.parse.Parser
 import filodb.prometheus.query.PrometheusModel.Sampl
 import filodb.query.{LogicalPlan, QueryError, QueryResult}
 
-object PrometheusApiRoute {
-  def staticSpreadFunc(settings: HttpSettings)(filter: Seq[ColumnFilter]): scala.Seq[QueryCommands.SpreadChange] = {
-    Seq(SpreadChange(settings.queryDefaultSpread))
-  }
-}
 
 class PrometheusApiRoute(nodeCoord: ActorRef, settings: HttpSettings)(implicit am: ActorMaterializer)
            extends FiloRoute with StrictLogging {
@@ -38,8 +31,9 @@ class PrometheusApiRoute(nodeCoord: ActorRef, settings: HttpSettings)(implicit a
   import filodb.coordinator.client.Client._
   import filodb.prometheus.query.PrometheusModel._
 
-  val queryOptions = QueryOptions(spreadFunc = PrometheusApiRoute.staticSpreadFunc(settings),
-    sampleLimit = settings.querySampleLimit)
+  val spreadProvider = new StaticSpreadProvider(SpreadChange(0, settings.queryDefaultSpread))
+
+  val queryOptions = QueryOptions(spreadProvider, settings.querySampleLimit)
 
   val route = pathPrefix( "promql" / Segment) { dataset =>
     // Path: /promql/<datasetName>/api/v1/query_range
