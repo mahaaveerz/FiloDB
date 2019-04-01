@@ -57,7 +57,6 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
 
   val settings = new FilodbSettings(config)
   val ingesters = new HashMap[DatasetRef, ActorRef]
-  val queryActors = new HashMap[DatasetRef, ActorRef]
   var clusterActor: Option[ActorRef] = None
   val shardMaps = new HashMap[DatasetRef, ShardMapper]
   var statusActor: Option[ActorRef] = None
@@ -156,7 +155,7 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
         logger.info(s"Creating QueryActor for dataset $ref")
         val queryRef = context.actorOf(QueryActor.props(memStore, dataset, shardMaps(ref)), s"$Query-$ref")
         nca.tell(SubscribeShardUpdates(ref), self)
-        queryActors(ref) = queryRef
+        tempQueryRouter.queryActors(ref) = queryRef
 
         // TODO: Send status update to cluster actor
         logger.info(s"Coordinator set up for ingestion and querying for $ref.")
@@ -256,9 +255,9 @@ private[filodb] final class NodeCoordinatorActor(metaStore: MetaStore,
 
   private def reset(origin: ActorRef): Unit = {
     ingesters.values.foreach(_ ! PoisonPill)
-    queryActors.values.foreach(_ ! PoisonPill)
+    tempQueryRouter.queryActors.values.foreach(_ ! PoisonPill)
     ingesters.clear()
-    queryActors.clear()
+    tempQueryRouter.queryActors.clear()
     memStore.reset()
 
     // Wait for all ingestor children to die

@@ -27,13 +27,19 @@ class TempQueryRouter(settings: FilodbSettings) extends StrictLogging {
 
   // For now, datasets need to be set up for ingestion before they can be queried (in-mem only)
   // TODO: if we ever support query API against cold (not in memory) datasets, change this
-  def withQueryActor(originator: ActorRef, dataset: DatasetRef)(func: ActorRef => Unit): Unit =
+  def withQueryActor(originator: ActorRef, dataset: DatasetRef)(func: ActorRef => Unit): Unit = {
+    logger.info(s"finding query actor for dataset: $dataset from queryActors: $queryActors")
     queryActors.get(dataset) match {
       case Some(queryActor) => func(queryActor)
       case None => func(getRandomActor(nodeCoordinatorActors, random))
     }
+  }
 
-  private def getRandomActor(list: ArrayBuffer[ActorRef], random: Random): ActorRef = list(random.nextInt(list.size))
+  private def getRandomActor(list: ArrayBuffer[ActorRef], random: Random): ActorRef = {
+    val randomActor: ActorRef = list(random.nextInt(list.size))
+    logger.info(s"returning random: $randomActor")
+    return randomActor
+  }
 
   def receiveMemberEvent(memberEvent: MemberEvent, context: ActorContext, coord: ActorRef)
                         (implicit execContext: ExecutionContext): Unit = {
